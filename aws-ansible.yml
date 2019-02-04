@@ -1,0 +1,114 @@
+- name: Creating AWS resources
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+      - name: Ensure boto and boto3 modules are installed
+        pip:
+          name: "{{ item }}"
+        with_items:
+        - boto3
+        - botocore
+        
+      - name: Create EC2 security group
+        ec2_group:
+          name: awsansible
+          description: Allow access HTTP
+          region: us-east-1
+          rules:
+            - proto: tcp
+              from_port: 80
+              to_port: 80
+              cidr_ip: 0.0.0.0/0
+            - proto: tcp
+              from_port: 22
+              to_port: 22
+              cidr_ip: 0.0.0.0/0
+          tags:
+            Name: sg-aws-ansible
+        register: security_group
+
+      - name: Create an EC2 key
+        ec2_key:
+          name: aws-ansible-key
+          region: us-east-1
+        register: ec2_key
+
+      - name: Save private key
+        copy: content="{{ ec2_key.key.private_key }}" dest="./aws-ansible-key.pem" mode=0600
+        when: ec2_key.changed
+
+
+      - name: Create EC2 instance
+        ec2:
+          image: ami-01e3b8c3a51e88954
+          wait: yes
+          key_name: aws-ansible-key
+          instance_type: t2.micro
+          group_id:  "{{ security_group.group_id }}"
+          region: us-east-1
+          count: 1
+          instance_tags:
+            Name: aws-ansible
+        register: ec2
+
+      - name: Add the newly created EC2 instance(s) to host group
+        lineinfile:
+          dest: "./hosts"
+          regexp: "{{ item.public_ip }}"
+          insertafter: "[webserver]"
+          line: "{{ item.public_ip }} ansible_ssh_user=ec2-user ansible_ssh_private_key_file=./aws-ansible-key.pem"
+          state: present
+        with_items: "{{ ec2.instances }}"
+
+      - name: Wait file update
+        wait_for:
+          path: "./hosts"
+          search_regex: "ansible_ssh_user=ec2-user ansible_ssh_private_key_file=./aws-ansible-key.pem"
+
+      - name: Wait for SSH to come up
+        wait_for:
+          host: "{{ item.public_ip }}"
+          port: 22
+          delay: 60
+          timeout: 320
+          state: started
+        with_items: "{{ ec2.instances }}"
+
+      - name: Add IP to webserver group
+        add_host:
+          name: "{{ item.public_ip }}"
+          groups: webserver
+        with_items: "{{ ec2.instances }}"
+
+      - name: Create RDS instance
+        rds:
+          command: create
+          instance_name: aws-ansible
+          db_engine: MySQL
+          size: 20
+          instance_type: db.t2.micro
+          username: mysql_admin
+          password: awsansible
+          region: us-east-1
+        register: group
+
+      - name: Create CloudFront distribution
+        cloudfront_distribution:
+          state: present
+          default_origin_domain_name: "{{ ec2.instances[0].public_dns_name}}"
+          region: us-east-1
+          tags:
+            Priority: '1'
+        register: cdn
+
+      - debug:
+          msg: "CloudFront domain name: {{ cdn.domain_name }}"
+
+
+- name: Configuring instance
+  hosts: webserver
+  become: True
+  gather_facts: True
+  roles:
+    - webserver

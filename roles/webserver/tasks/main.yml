@@ -1,0 +1,5 @@
+- name: Installing nginx
+  command: amazon-linux-extras install nginx1.12
+
+- name: Starting nginx
+  command: systemctl start nginx.service
